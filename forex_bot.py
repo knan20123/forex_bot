@@ -7,6 +7,7 @@ import logging
 from datetime import datetime
 from flask import Flask
 import xml.etree.ElementTree as ET
+import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ app = Flask(__name__)
 sent_actual_ids = set()
 sent_news_titles = set()
 announced_pre = set()
-last_news_date = ""
+last_news_hour = ""
 last_gold_price = None
 weekly_events = []
 user_currencies = {'USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'NZD', 'CHF'}
@@ -42,22 +43,23 @@ COUNTRY_NAME = {
 
 ALL_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'NZD', 'CHF', 'CNY']
 
-# كلمات مفتاحية للفلتر
 KEYWORDS = [
     'فيدرالي', 'فائدة', 'تضخم', 'بطالة', 'ناتج', 'اقتصاد', 'نمو',
-    'بيتكوين', 'عملات رقمية', 'كريبتو', 'بلوكشين',
-    'نفط', 'ذهب', 'برميل', 'اوبك',
-    'حرب', 'عقوبات', 'صراع', 'توتر',
+    'بيتكوين', 'عملات رقمية', 'كريبتو', 'بلوكشين', 'ايثيريوم',
+    'نفط', 'ذهب', 'برميل', 'اوبك', 'خام',
+    'حرب', 'عقوبات', 'صراع', 'توتر', 'ازمة',
     'دولار', 'يورو', 'عملة', 'صرف',
-    'بورصة', 'اسهم', 'سوق', 'استثمار',
-    'بنك', 'مركزي', 'سياسة نقدية',
-    'ديون', 'ميزانية', 'عجز'
+    'بورصة', 'اسهم', 'سوق', 'استثمار', 'مؤشر',
+    'بنك', 'مركزي', 'سياسة نقدية', 'احتياطي',
+    'ديون', 'ميزانية', 'عجز', 'تجارة',
+    'صندوق النقد', 'البنك الدولي', 'ناسداك', 'وول ستريت'
 ]
 
 RSS_FEEDS = [
     ('الجزيرة اقتصاد', 'https://www.aljazeera.net/rss/economy.xml'),
     ('العربية اقتصاد', 'https://www.alarabiya.net/rss/asequence/economy'),
-
+    ('رويترز عربي', 'https://feeds.reuters.com/reuters/MENBusinessNews'),
+    ('CNBC عربية', 'https://www.cnbcarabia.com/rss'),
 ]
 
 @app.route('/')
@@ -110,8 +112,6 @@ def fetch_rss_news():
             for item in items[:10]:
                 title = item.findtext('title', '').strip()
                 desc = item.findtext('description', '').strip()
-                # إزالة HTML tags من الوصف
-                import re
                 desc = re.sub('<[^<]+?>', '', desc)[:150]
                 if title and is_important(title, desc):
                     all_news.append({
@@ -137,7 +137,6 @@ def fetch_calendar():
         return []
     data = response.json()
     events = []
-    now = datetime.utcnow()
     for item in data:
         if item.get('impact') != 'High':
             continue
@@ -188,13 +187,12 @@ def monitor_gold():
         time.sleep(7200)
 
 def send_daily_news():
-    global last_news_date
+    global last_news_hour
     while True:
         try:
             now = datetime.utcnow()
-            today = now.strftime('%Y-%m-%d')
-            # ارسال الاخبار مرتين يوميا الساعة 8 صباحا و4 مساء
-            if now.hour in [8, 16] and today + str(now.hour) != last_news_date:
+            hour_key = now.strftime('%Y-%m-%d') + str(now.hour)
+            if now.hour in [8, 16] and hour_key != last_news_hour:
                 articles = fetch_rss_news()
                 new_articles = [a for a in articles if a['title'] not in sent_news_titles]
                 if new_articles:
@@ -207,7 +205,7 @@ def send_daily_news():
                         msg += "📡 " + a['source'] + "\n\n"
                         sent_news_titles.add(a['title'])
                     bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-                    last_news_date = today + str(now.hour)
+                    last_news_hour = hour_key
                     logger.info("تم ارسال الاخبار")
         except Exception as ex:
             logger.error("خطا الاخبار: " + str(ex))
