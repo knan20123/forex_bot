@@ -57,7 +57,7 @@ KEYWORDS = [
 RSS_FEEDS = [
     ('الجزيرة اقتصاد', 'https://www.aljazeera.net/rss/economy.xml'),
     ('العربية اقتصاد', 'https://www.alarabiya.net/rss/asequence/economy'),
-    ('سكاي نيوز عربية', 'https://www.skynewsarabia.com/rss.xml'),
+
 ]
 
 @app.route('/')
