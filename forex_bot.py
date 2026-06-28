@@ -6,20 +6,21 @@ import threading
 import logging
 from datetime import datetime
 from flask import Flask
+import xml.etree.ElementTree as ET
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TOKEN = "8687483288:AAHZnOZs396LLTgPaNHnH_KQGhDCCBoxOzM"
 CHAT_ID = "1718292210"
-NEWS_API = "2d204ac646d8474aa51ba3804ff4cc62"
 GOLD_API = "goldapi-c4085f23c4a16779d6d8d8bb3eaf9550-io"
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-sent_event_ids = set()
+sent_actual_ids = set()
 sent_news_titles = set()
+announced_pre = set()
 last_news_date = ""
 last_gold_price = None
 weekly_events = []
@@ -41,6 +42,24 @@ COUNTRY_NAME = {
 
 ALL_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'NZD', 'CHF', 'CNY']
 
+# كلمات مفتاحية للفلتر
+KEYWORDS = [
+    'فيدرالي', 'فائدة', 'تضخم', 'بطالة', 'ناتج', 'اقتصاد', 'نمو',
+    'بيتكوين', 'عملات رقمية', 'كريبتو', 'بلوكشين',
+    'نفط', 'ذهب', 'برميل', 'اوبك',
+    'حرب', 'عقوبات', 'صراع', 'توتر',
+    'دولار', 'يورو', 'عملة', 'صرف',
+    'بورصة', 'اسهم', 'سوق', 'استثمار',
+    'بنك', 'مركزي', 'سياسة نقدية',
+    'ديون', 'ميزانية', 'عجز'
+]
+
+RSS_FEEDS = [
+    ('الجزيرة اقتصاد', 'https://www.aljazeera.net/rss/economy.xml'),
+    ('العربية اقتصاد', 'https://www.alarabiya.net/rss/asequence/economy'),
+    ('سكاي نيوز عربية', 'https://www.skynewsarabia.com/rss.xml'),
+]
+
 @app.route('/')
 def home():
     return "البوت يعمل!"
@@ -54,6 +73,12 @@ def format_time(raw):
         return dt.strftime('%Y-%m-%d %H:%M')
     except:
         return raw
+
+def parse_event_time(raw):
+    try:
+        return datetime.fromisoformat(raw)
+    except:
+        return None
 
 def get_sentiment(actual, forecast):
     try:
@@ -70,6 +95,34 @@ def get_sentiment(actual, forecast):
     except:
         return ''
 
+def is_important(title, desc=''):
+    text = (title + ' ' + desc).lower()
+    return any(kw in text for kw in KEYWORDS)
+
+def fetch_rss_news():
+    all_news = []
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    for source_name, url in RSS_FEEDS:
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            root = ET.fromstring(response.content)
+            items = root.findall('.//item')
+            for item in items[:10]:
+                title = item.findtext('title', '').strip()
+                desc = item.findtext('description', '').strip()
+                # إزالة HTML tags من الوصف
+                import re
+                desc = re.sub('<[^<]+?>', '', desc)[:150]
+                if title and is_important(title, desc):
+                    all_news.append({
+                        'title': title,
+                        'desc': desc,
+                        'source': source_name
+                    })
+        except Exception as ex:
+            logger.error("خطا RSS " + source_name + ": " + str(ex))
+    return all_news
+
 def fetch_gold_price():
     url = "https://www.goldapi.io/api/XAU/USD"
     headers = {'x-access-token': GOLD_API}
@@ -84,16 +137,22 @@ def fetch_calendar():
         return []
     data = response.json()
     events = []
+    now = datetime.utcnow()
     for item in data:
         if item.get('impact') != 'High':
             continue
         country = item.get('country', '')
         if country not in user_currencies:
             continue
-        eid = f"{item.get('date')}_{country}_{item.get('title')}"
+        raw_date = item.get('date', '')
+        event_dt = parse_event_time(raw_date)
+        if not event_dt:
+            continue
+        eid = raw_date + "_" + country + "_" + item.get('title', '')
         events.append({
             'id': eid,
-            'time': format_time(item.get('date', '')),
+            'dt': event_dt,
+            'time': format_time(raw_date),
             'country': country,
             'event': item.get('title', ''),
             'forecast': item.get('forecast') or '--',
@@ -101,25 +160,6 @@ def fetch_calendar():
             'actual': item.get('actual') or '',
         })
     return events
-
-def fetch_arabic_news():
-    url = (
-        "https://newsapi.org/v2/everything?"
-        "q=gold+OR+forex+OR+markets&"
-        "language=ar&sortBy=publishedAt&"
-        "pageSize=5&apiKey=" + NEWS_API
-    )
-    response = requests.get(url, timeout=15)
-    articles = response.json().get('articles', [])
-    if not articles:
-        url2 = (
-            "https://newsapi.org/v2/top-headlines?"
-            "category=business&language=ar&"
-            "pageSize=5&apiKey=" + NEWS_API
-        )
-        response2 = requests.get(url2, timeout=15)
-        articles = response2.json().get('articles', [])
-    return articles
 
 def monitor_gold():
     global last_gold_price
@@ -144,7 +184,7 @@ def monitor_gold():
                 last_gold_price = price
                 bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
         except Exception as ex:
-            logger.error(f"خطا الذهب: {ex}")
+            logger.error("خطا الذهب: " + str(ex))
         time.sleep(7200)
 
 def send_daily_news():
@@ -153,25 +193,24 @@ def send_daily_news():
         try:
             now = datetime.utcnow()
             today = now.strftime('%Y-%m-%d')
-            if now.hour == 8 and today != last_news_date:
-                articles = fetch_arabic_news()
-                if articles:
-                    msg = "📰 *اخبار السوق والذهب اليومية*\n"
+            # ارسال الاخبار مرتين يوميا الساعة 8 صباحا و4 مساء
+            if now.hour in [8, 16] and today + str(now.hour) != last_news_date:
+                articles = fetch_rss_news()
+                new_articles = [a for a in articles if a['title'] not in sent_news_titles]
+                if new_articles:
+                    msg = "📰 *اخبار اقتصادية مهمة*\n"
                     msg += "━━━━━━━━━━━━━━━━━\n\n"
-                    for a in articles:
-                        title = a.get('title', '')
-                        source = a.get('source', {}).get('name', '')
-                        desc = a.get('description', '')
-                        if title and title not in sent_news_titles:
-                            msg += "📌 *" + title + "*\n"
-                            if desc:
-                                msg += "📝 " + desc[:100] + "...\n"
-                            msg += "📡 المصدر: " + source + "\n\n"
-                            sent_news_titles.add(title)
+                    for a in new_articles[:5]:
+                        msg += "📌 *" + a['title'] + "*\n"
+                        if a['desc']:
+                            msg += "📝 " + a['desc'] + "\n"
+                        msg += "📡 " + a['source'] + "\n\n"
+                        sent_news_titles.add(a['title'])
                     bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-                    last_news_date = today
+                    last_news_date = today + str(now.hour)
+                    logger.info("تم ارسال الاخبار")
         except Exception as ex:
-            logger.error(f"خطا الاخبار: {ex}")
+            logger.error("خطا الاخبار: " + str(ex))
         time.sleep(1800)
 
 def send_weekly_stats():
@@ -199,33 +238,33 @@ def send_weekly_stats():
                     bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
                     weekly_events.clear()
         except Exception as ex:
-            logger.error(f"خطا الاحصائيات: {ex}")
+            logger.error("خطا الاحصائيات: " + str(ex))
         time.sleep(3600)
 
 def check_calendar():
-    announced_pre = set()
+    upcoming_sent = {}
     while True:
         try:
+            now = datetime.utcnow()
             events = fetch_calendar()
             for e in events:
-                try:
-                    dt = datetime.fromisoformat(e['time'].replace(' ', 'T') + ':00')
-                    diff = (dt - datetime.utcnow()).total_seconds() / 60
-                    pre_id = "pre_" + e['id']
-                    if 14 <= diff <= 16 and pre_id not in announced_pre:
-                        flag = COUNTRY_FLAG.get(e['country'], '')
-                        name = COUNTRY_NAME.get(e['country'], e['country'])
-                        msg = "⏰ *تنبيه! خبر بعد 15 دقيقة*\n━━━━━━━━━━━━━━━━━\n\n"
-                        msg += flag + " *" + name + "* - " + e['event'] + "\n"
-                        msg += "🎯 التوقع: `" + e['forecast'] + "`\n"
-                        msg += "📉 السابق: `" + e['previous'] + "`"
-                        bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-                        announced_pre.add(pre_id)
-                except:
-                    pass
+                event_dt = e['dt']
+                diff_minutes = (event_dt - now).total_seconds() / 60
+
+                pre_id = "pre_" + e['id']
+                if 14 <= diff_minutes <= 16 and pre_id not in announced_pre:
+                    flag = COUNTRY_FLAG.get(e['country'], '')
+                    name = COUNTRY_NAME.get(e['country'], e['country'])
+                    msg = "⏰ *تنبيه! خبر بعد 15 دقيقة*\n━━━━━━━━━━━━━━━━━\n\n"
+                    msg += flag + " *" + name + "*\n"
+                    msg += "📌 " + e['event'] + "\n"
+                    msg += "🎯 التوقع: `" + e['forecast'] + "`\n"
+                    msg += "📉 السابق: `" + e['previous'] + "`"
+                    bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
+                    announced_pre.add(pre_id)
 
                 actual_id = "actual_" + e['id']
-                if e['actual'] and actual_id not in sent_event_ids:
+                if e['actual'] and actual_id not in sent_actual_ids:
                     flag = COUNTRY_FLAG.get(e['country'], '')
                     name = COUNTRY_NAME.get(e['country'], e['country'])
                     sentiment = get_sentiment(e['actual'], e['forecast'])
@@ -241,11 +280,14 @@ def check_calendar():
                     if sentiment:
                         msg += icon + " التحليل: " + sentiment
                     bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-                    sent_event_ids.add(actual_id)
+                    sent_actual_ids.add(actual_id)
                     e['sentiment'] = sentiment
                     weekly_events.append(e)
 
-                if e['id'] not in sent_event_ids and not e['actual']:
+                upcoming_id = "upcoming_" + e['id']
+                if (not e['actual'] and
+                    upcoming_id not in upcoming_sent and
+                    -60 <= diff_minutes <= 2880):
                     flag = COUNTRY_FLAG.get(e['country'], '')
                     name = COUNTRY_NAME.get(e['country'], e['country'])
                     msg = "📊 *حدث اقتصادي قادم* 🔴\n━━━━━━━━━━━━━━━━━\n\n"
@@ -256,9 +298,10 @@ def check_calendar():
                     msg += "🎯 التوقع: `" + e['forecast'] + "`\n"
                     msg += "📉 السابق: `" + e['previous'] + "`"
                     bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-                    sent_event_ids.add(e['id'])
+                    upcoming_sent[upcoming_id] = now
+
         except Exception as ex:
-            logger.error(f"خطا التقويم: {ex}")
+            logger.error("خطا التقويم: " + str(ex))
         time.sleep(120)
 
 def send_main_menu(chat_id):
@@ -283,7 +326,7 @@ def start(m):
         "🔔 سيتم اشعارك تلقائيا بـ:\n"
         "• الاحداث الاقتصادية عالية التاثير\n"
         "• سعر الذهب كل ساعتين\n"
-        "• اخبار السوق اليومية\n\n"
+        "• اخبار اقتصادية مهمة مرتين يوميا\n\n"
         "اضغط على 📋 *القائمة* للبدء\n\n"
         "👨 *تم انشاء هذا البوت بواسطة*\n"
         "د/عاصم النجار"
@@ -339,20 +382,17 @@ def handle_callback(c):
 
     elif data == "news":
         try:
-            articles = fetch_arabic_news()
+            articles = fetch_rss_news()
             if articles:
-                msg = "📰 *اخر اخبار السوق*\n━━━━━━━━━━━━━━━━━\n\n"
+                msg = "📰 *اخر الاخبار الاقتصادية*\n━━━━━━━━━━━━━━━━━\n\n"
                 for a in articles[:5]:
-                    title = a.get('title', '')
-                    source = a.get('source', {}).get('name', '')
-                    desc = a.get('description', '')
-                    msg += "📌 *" + title + "*\n"
-                    if desc:
-                        msg += "📝 " + desc[:100] + "...\n"
-                    msg += "📡 " + source + "\n\n"
+                    msg += "📌 *" + a['title'] + "*\n"
+                    if a['desc']:
+                        msg += "📝 " + a['desc'] + "\n"
+                    msg += "📡 " + a['source'] + "\n\n"
                 bot.send_message(chat_id, msg, parse_mode="Markdown")
             else:
-                bot.send_message(chat_id, "لا توجد اخبار متاحة الان.")
+                bot.send_message(chat_id, "لا توجد اخبار مهمة الان.")
         except Exception as ex:
             bot.send_message(chat_id, "خطا: " + str(ex))
 
@@ -409,7 +449,7 @@ def handle_callback(c):
         msg = (
             "✅ *البوت يعمل بشكل طبيعي*\n"
             "━━━━━━━━━━━━━━━━━\n"
-            "📌 احداث متابعة: " + str(len(sent_event_ids)) + "\n"
+            "📌 احداث متابعة: " + str(len(sent_actual_ids)) + "\n"
             "💱 عملات مفعلة: " + str(len(user_currencies)) +
             gold_txt
         )
