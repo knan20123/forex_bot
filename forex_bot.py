@@ -4,7 +4,7 @@ import requests
 import time
 import threading
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from flask import Flask
 import xml.etree.ElementTree as ET
 import re
@@ -247,7 +247,7 @@ def check_calendar():
             events = fetch_calendar()
             for e in events:
                 event_dt = e['dt']
-                diff_minutes = (event_dt - now).total_seconds() / 60
+                diff_minutes = (event_dt.replace(tzinfo=None) - now.replace(tzinfo=None)).total_seconds() / 60
 
                 pre_id = "pre_" + e['id']
                 if 14 <= diff_minutes <= 16 and pre_id not in announced_pre:
