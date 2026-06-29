@@ -4,7 +4,7 @@ import requests
 import time
 import threading
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Flask
 import xml.etree.ElementTree as ET
 import re
@@ -190,7 +190,7 @@ def send_daily_news():
     global last_news_hour
     while True:
         try:
-            now = datetime.now()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             hour_key = now.strftime('%Y-%m-%d') + str(now.hour)
             if now.hour in [8, 16] and hour_key != last_news_hour:
                 articles = fetch_rss_news()
@@ -214,7 +214,7 @@ def send_daily_news():
 def send_weekly_stats():
     while True:
         try:
-            now = datetime.now()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             if now.weekday() == 4 and now.hour == 20:
                 if weekly_events:
                     positive = sum(1 for e in weekly_events if 'ايجابي' in e.get('sentiment',''))
@@ -243,7 +243,7 @@ def check_calendar():
     upcoming_sent = {}
     while True:
         try:
-            now = datetime.now()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             events = fetch_calendar()
             for e in events:
                 event_dt = e['dt']
@@ -361,7 +361,7 @@ def handle_callback(c):
     elif data == "today":
         try:
             events = fetch_calendar()
-            today = datetime.now().strftime('%Y-%m-%d')
+            today = datetime.now(timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%d')
             today_events = [e for e in events if e['time'].startswith(today)]
             if today_events:
                 msg = "📅 *احداث اليوم الاقتصادية* 🔴\n━━━━━━━━━━━━━━━━━\n\n"
