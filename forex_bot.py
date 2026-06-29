@@ -463,3 +463,4 @@ if __name__ == "__main__":
     threading.Thread(target=send_daily_news, daemon=True).start()
     threading.Thread(target=send_weekly_stats, daemon=True).start()
     bot.infinity_polling()
+# update Mon Jun 29 08:16:53 +03 2026
