@@ -393,7 +393,7 @@ def start(m):
 def show_menu(m):
     send_main_menu(m.chat.id)
 
-@bot.message_handler(func=lambda m: True, content_types=['text'])
+@bot.message_handler(func=lambda m: m.text not in ['📋 القائمة'] and not m.text.startswith('/'), content_types=['text'])
 def handle_text(m):
     chat_id = m.chat.id
     text = m.text.strip()
