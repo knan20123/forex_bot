@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from flask import Flask
 import xml.etree.ElementTree as ET
 import re
+import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,6 +26,11 @@ announced_pre = set()
 last_gold_price = None
 weekly_events = []
 user_currencies = {'USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'NZD', 'CHF'}
+
+# تنبيهات الاسعار المخصصة {chat_id: {'gold': price, 'USD': price}}
+price_alerts = {}
+# حالة انتظار المدخلات
+user_states = {}
 
 COUNTRY_FLAG = {
     'USD': '🇺🇸', 'EUR': '🇪🇺', 'GBP': '🇬🇧', 'JPY': '🇯🇵',
@@ -45,15 +51,12 @@ ALL_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'NZD', 'CHF', 'CNY']
 KEYWORDS = [
     'حرب', 'عقوبات', 'صراع', 'توتر', 'ازمة', 'هجوم', 'غارة', 'قصف',
     'فيدرالي', 'فائدة', 'تضخم', 'بطالة', 'ناتج', 'اقتصاد', 'نمو', 'ركود',
-    'بيتكوين', 'عملات رقمية', 'كريبتو', 'ايثيريوم', 'بلوكشين',
-    'نفط', 'ذهب', 'برميل', 'اوبك', 'خام',
+    'بيتكوين', 'عملات رقمية', 'كريبتو', 'ايثيريوم',
+    'نفط', 'ذهب', 'برميل', 'اوبك',
     'دولار', 'يورو', 'عملة', 'صرف',
     'بورصة', 'اسهم', 'سوق', 'استثمار', 'مؤشر',
     'بنك', 'مركزي', 'احتياطي',
-    'ديون', 'ميزانية', 'عجز',
-    'صندوق النقد', 'البنك الدولي',
-    'زلزال', 'كارثة', 'وفاة', 'اغتيال', 'انتخاب',
-    'نووي', 'صاروخ', 'تفجير'
+    'نووي', 'صاروخ', 'تفجير', 'اغتيال'
 ]
 
 RSS_FEEDS = [
@@ -76,8 +79,7 @@ def run_flask():
 def clean_text(text):
     text = re.sub('<[^<]+?>', '', text)
     text = re.sub(r'http\S+', '', text)
-    text = text.strip()
-    return text
+    return text.strip()
 
 def is_important(title, desc=''):
     text = (title + ' ' + desc).lower()
@@ -95,47 +97,25 @@ def fetch_rss_news():
                 title = clean_text(item.findtext('title', ''))
                 desc = clean_text(item.findtext('description', ''))[:200]
                 if title and is_important(title, desc) and title not in sent_news_titles:
-                    all_news.append({
-                        'title': title,
-                        'desc': desc,
-                    })
+                    all_news.append({'title': title, 'desc': desc})
         except Exception as ex:
             logger.error("خطا RSS: " + str(ex))
     return all_news
-
-def format_time(raw):
-    try:
-        dt = datetime.fromisoformat(raw)
-        return dt.strftime('%Y-%m-%d %H:%M')
-    except:
-        return raw
-
-def parse_event_time(raw):
-    try:
-        return datetime.fromisoformat(raw)
-    except:
-        return None
-
-def get_sentiment(actual, forecast):
-    try:
-        def parse(v):
-            return float(str(v).replace('%','').replace('K','').replace('M','').strip())
-        a = parse(actual)
-        f = parse(forecast)
-        if a > f:
-            return 'ايجابي - صعودي للعملة'
-        elif a < f:
-            return 'سلبي - هبوطي للعملة'
-        else:
-            return 'محايد'
-    except:
-        return ''
 
 def fetch_gold_price():
     url = "https://www.goldapi.io/api/XAU/USD"
     headers = {'x-access-token': GOLD_API}
     response = requests.get(url, headers=headers, timeout=15)
     return response.json().get('price', None)
+
+def fetch_currency_rates():
+    try:
+        url = "https://api.exchangerate-api.com/v4/latest/USD"
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        return data.get('rates', {})
+    except:
+        return {}
 
 def fetch_calendar():
     url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
@@ -152,14 +132,15 @@ def fetch_calendar():
         if country not in user_currencies:
             continue
         raw_date = item.get('date', '')
-        event_dt = parse_event_time(raw_date)
-        if not event_dt:
+        try:
+            event_dt = datetime.fromisoformat(raw_date)
+        except:
             continue
         eid = raw_date + "_" + country + "_" + item.get('title', '')
         events.append({
             'id': eid,
             'dt': event_dt,
-            'time': format_time(raw_date),
+            'time': event_dt.strftime('%Y-%m-%d %H:%M'),
             'country': country,
             'event': item.get('title', ''),
             'forecast': item.get('forecast') or '--',
@@ -167,6 +148,64 @@ def fetch_calendar():
             'actual': item.get('actual') or '',
         })
     return events
+
+def get_sentiment(actual, forecast):
+    try:
+        def parse(v):
+            return float(str(v).replace('%','').replace('K','').replace('M','').strip())
+        a = parse(actual)
+        f = parse(forecast)
+        if a > f:
+            return 'ايجابي', '📈'
+        elif a < f:
+            return 'سلبي', '📉'
+        else:
+            return 'محايد', '➡️'
+    except:
+        return '', ''
+
+def get_trade_recommendation(event, actual, forecast, previous, country):
+    try:
+        sentiment, icon = get_sentiment(actual, forecast)
+        if not sentiment:
+            return ''
+        
+        currency = COUNTRY_NAME.get(country, country)
+        flag = COUNTRY_FLAG.get(country, '')
+        
+        msg = "\n💡 *توصية التداول:*\n"
+        
+        if sentiment == 'ايجابي':
+            msg += f"📈 الخبر ايجابي لـ {flag} {currency}\n"
+            if country == 'USD':
+                msg += "✅ فكر في: شراء الدولار / بيع الذهب\n"
+                msg += "⚠️ أزواج محتملة: USD/JPY ↑ | EUR/USD ↓ | XAU/USD ↓"
+            elif country == 'EUR':
+                msg += "✅ فكر في: شراء اليورو\n"
+                msg += "⚠️ أزواج محتملة: EUR/USD ↑ | EUR/JPY ↑"
+            elif country == 'GBP':
+                msg += "✅ فكر في: شراء الجنيه\n"
+                msg += "⚠️ أزواج محتملة: GBP/USD ↑ | GBP/JPY ↑"
+            else:
+                msg += "✅ فكر في: شراء " + currency
+        else:
+            msg += f"📉 الخبر سلبي لـ {flag} {currency}\n"
+            if country == 'USD':
+                msg += "✅ فكر في: بيع الدولار / شراء الذهب\n"
+                msg += "⚠️ أزواج محتملة: USD/JPY ↓ | EUR/USD ↑ | XAU/USD ↑"
+            elif country == 'EUR':
+                msg += "✅ فكر في: بيع اليورو\n"
+                msg += "⚠️ أزواج محتملة: EUR/USD ↓ | EUR/JPY ↓"
+            elif country == 'GBP':
+                msg += "✅ فكر في: بيع الجنيه\n"
+                msg += "⚠️ أزواج محتملة: GBP/USD ↓ | GBP/JPY ↓"
+            else:
+                msg += "✅ فكر في: بيع " + currency
+        
+        msg += "\n\n⚠️ *تنبيه: هذه اقتراحات وليست نصائح مالية*"
+        return msg
+    except:
+        return ''
 
 def monitor_gold():
     global last_gold_price
@@ -181,15 +220,30 @@ def monitor_gold():
                     diff = price - last_gold_price
                     pct = (diff / last_gold_price) * 100
                     if diff > 0:
-                        msg += "📈 التغيير: +$" + f"{diff:,.2f} (+{pct:.2f}%)" + "\n"
+                        msg += "📈 التغيير: +$" + f"{diff:,.2f} (+{pct:.2f}%)\n"
                         msg += "🟢 الاتجاه: صعودي"
                     elif diff < 0:
-                        msg += "📉 التغيير: $" + f"{diff:,.2f} ({pct:.2f}%)" + "\n"
+                        msg += "📉 التغيير: $" + f"{diff:,.2f} ({pct:.2f}%)\n"
                         msg += "🔴 الاتجاه: هبوطي"
                     else:
                         msg += "➡️ لا يوجد تغيير"
                 last_gold_price = price
                 bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
+
+                # فحص تنبيهات الذهب
+                for cid, alerts in price_alerts.items():
+                    if 'gold' in alerts:
+                        target = alerts['gold']
+                        if (last_gold_price and last_gold_price < target <= price) or \
+                           (last_gold_price and last_gold_price > target >= price):
+                            bot.send_message(cid,
+                                "🔔 *تنبيه الذهب!*\n"
+                                "━━━━━━━━━━━━━━━━━\n\n"
+                                "🥇 وصل الذهب للسعر المحدد!\n"
+                                "💰 السعر الحالي: *$" + f"{price:,.2f}" + "*\n"
+                                "🎯 السعر المستهدف: *$" + f"{target:,.2f}" + "*",
+                                parse_mode="Markdown")
+                            del price_alerts[cid]['gold']
         except Exception as ex:
             logger.error("خطا الذهب: " + str(ex))
         time.sleep(7200)
@@ -198,17 +252,15 @@ def monitor_news():
     while True:
         try:
             articles = fetch_rss_news()
-            if articles:
-                for a in articles[:5]:
-                    msg = "📰 *خبر عاجل*\n"
-                    msg += "━━━━━━━━━━━━━━━━━\n\n"
-                    msg += "📌 *" + a['title'] + "*\n"
-                    if a['desc'] and a['desc'] != a['title']:
-                        msg += "📝 " + a['desc'] + "\n"
-                    bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-                    sent_news_titles.add(a['title'])
-                    time.sleep(2)
-            logger.info("فحص الاخبار: " + str(len(articles)) + " خبر جديد")
+            for a in articles[:5]:
+                msg = "📰 *خبر عاجل*\n"
+                msg += "━━━━━━━━━━━━━━━━━\n\n"
+                msg += "📌 *" + a['title'] + "*\n"
+                if a['desc'] and a['desc'] != a['title']:
+                    msg += "📝 " + a['desc'] + "\n"
+                bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
+                sent_news_titles.add(a['title'])
+                time.sleep(2)
         except Exception as ex:
             logger.error("خطا الاخبار: " + str(ex))
         time.sleep(900)
@@ -227,14 +279,11 @@ def send_weekly_stats():
                     msg += "📈 نتائج ايجابية: " + str(positive) + "\n"
                     msg += "📉 نتائج سلبية: " + str(negative) + "\n"
                     msg += "➡️ نتائج محايدة: " + str(neutral) + "\n\n"
-                    msg += "*ابرز احداث الاسبوع:*\n"
-                    msg += "─────────────────\n"
                     for e in weekly_events[-10:]:
                         flag = COUNTRY_FLAG.get(e['country'], '')
                         name = COUNTRY_NAME.get(e['country'], e['country'])
                         msg += flag + " " + name + " - " + e['event'] + "\n"
-                        msg += "✅ الفعلي: " + e['actual'] + " | 🎯 التوقع: " + e['forecast'] + "\n"
-                        msg += e.get('sentiment','') + "\n\n"
+                        msg += "✅ " + e['actual'] + " | 🎯 " + e['forecast'] + "\n\n"
                     bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
                     weekly_events.clear()
         except Exception as ex:
@@ -267,8 +316,7 @@ def check_calendar():
                 if e['actual'] and actual_id not in sent_actual_ids:
                     flag = COUNTRY_FLAG.get(e['country'], '')
                     name = COUNTRY_NAME.get(e['country'], e['country'])
-                    sentiment = get_sentiment(e['actual'], e['forecast'])
-                    icon = "📈" if "ايجابي" in sentiment else "📉" if "سلبي" in sentiment else "➡️"
+                    sentiment_text, icon = get_sentiment(e['actual'], e['forecast'])
                     msg = "🚨 *صدر الخبر الان!*\n━━━━━━━━━━━━━━━━━\n\n"
                     msg += "🕐 `" + e['time'] + "`\n"
                     msg += flag + " *" + name + "*\n"
@@ -277,11 +325,16 @@ def check_calendar():
                     msg += "🎯 التوقع: `" + e['forecast'] + "`\n"
                     msg += "📉 السابق: `" + e['previous'] + "`\n"
                     msg += "✅ الفعلي: `" + e['actual'] + "`\n"
-                    if sentiment:
-                        msg += icon + " التحليل: " + sentiment
+                    if sentiment_text:
+                        msg += icon + " التحليل: " + sentiment_text + "\n"
+                    recommendation = get_trade_recommendation(
+                        e['event'], e['actual'], e['forecast'],
+                        e['previous'], e['country'])
+                    if recommendation:
+                        msg += recommendation
                     bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
                     sent_actual_ids.add(actual_id)
-                    e['sentiment'] = sentiment
+                    e['sentiment'] = sentiment_text
                     weekly_events.append(e)
 
                 upcoming_id = "upcoming_" + e['id']
@@ -299,7 +352,6 @@ def check_calendar():
                     msg += "📉 السابق: `" + e['previous'] + "`"
                     bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
                     upcoming_sent[upcoming_id] = now
-
         except Exception as ex:
             logger.error("خطا التقويم: " + str(ex))
         time.sleep(120)
@@ -308,8 +360,10 @@ def send_main_menu(chat_id):
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("🥇 سعر الذهب", callback_data="gold"),
+        types.InlineKeyboardButton("💱 اسعار العملات", callback_data="currencies"),
         types.InlineKeyboardButton("📅 احداث اليوم", callback_data="today"),
         types.InlineKeyboardButton("📰 اخر الاخبار", callback_data="news"),
+        types.InlineKeyboardButton("🔔 تنبيه سعر", callback_data="set_alert"),
         types.InlineKeyboardButton("⚙️ فلتر العملات", callback_data="filter"),
         types.InlineKeyboardButton("📊 احصائيات الاسبوع", callback_data="stats"),
         types.InlineKeyboardButton("📡 حالة البوت", callback_data="status")
@@ -325,8 +379,10 @@ def start(m):
         "👋 *اهلا بك في بوت الاسواق المالية!*\n\n"
         "🔔 سيتم اشعارك تلقائيا بـ:\n"
         "• الاحداث الاقتصادية عالية التاثير\n"
+        "• توصيات تداول بعد كل خبر\n"
         "• سعر الذهب كل ساعتين\n"
-        "• اخبار عاجلة ومهمة كل 15 دقيقة\n\n"
+        "• اخبار عاجلة كل 15 دقيقة\n"
+        "• تنبيهات اسعار مخصصة\n\n"
         "اضغط على 📋 *القائمة* للبدء\n\n"
         "👨 *تم انشاء هذا البوت بواسطة*\n"
         "د/عاصم النجار"
@@ -336,6 +392,47 @@ def start(m):
 @bot.message_handler(func=lambda m: m.text == "📋 القائمة")
 def show_menu(m):
     send_main_menu(m.chat.id)
+
+@bot.message_handler(func=lambda m: True, content_types=['text'])
+def handle_text(m):
+    chat_id = m.chat.id
+    text = m.text.strip()
+
+    if chat_id in user_states:
+        state = user_states[chat_id]
+
+        if state == 'waiting_gold_alert':
+            try:
+                price = float(text.replace(',', ''))
+                if chat_id not in price_alerts:
+                    price_alerts[chat_id] = {}
+                price_alerts[chat_id]['gold'] = price
+                del user_states[chat_id]
+                bot.send_message(chat_id,
+                    "✅ *تم تفعيل التنبيه!*\n"
+                    "🥇 سيتم اشعارك عندما يصل الذهب الى: *$" + f"{price:,.2f}" + "*",
+                    parse_mode="Markdown")
+            except:
+                bot.send_message(chat_id, "❌ ارسل رقماً صحيحاً مثل: 4100")
+
+        elif state == 'waiting_currency_alert':
+            try:
+                parts = text.split()
+                if len(parts) == 2:
+                    currency = parts[0].upper()
+                    price = float(parts[1])
+                    if chat_id not in price_alerts:
+                        price_alerts[chat_id] = {}
+                    price_alerts[chat_id][currency] = price
+                    del user_states[chat_id]
+                    bot.send_message(chat_id,
+                        "✅ *تم تفعيل التنبيه!*\n"
+                        "💱 سيتم اشعارك عندما يصل " + currency + " الى: *" + str(price) + "*",
+                        parse_mode="Markdown")
+                else:
+                    bot.send_message(chat_id, "❌ ارسل العملة والسعر مثل: EUR 1.10")
+            except:
+                bot.send_message(chat_id, "❌ ارسل العملة والسعر مثل: EUR 1.10")
 
 @bot.callback_query_handler(func=lambda c: True)
 def handle_callback(c):
@@ -351,14 +448,63 @@ def handle_callback(c):
                 diff = price - last_gold_price
                 pct = (diff / last_gold_price) * 100
                 if diff > 0:
-                    msg += "📈 التغيير: +$" + f"{diff:,.2f} (+{pct:.2f}%)" + "\n🟢 صعودي"
+                    msg += "📈 +$" + f"{diff:,.2f} (+{pct:.2f}%)" + "\n🟢 صعودي"
                 elif diff < 0:
-                    msg += "📉 التغيير: $" + f"{diff:,.2f} ({pct:.2f}%)" + "\n🔴 هبوطي"
-                else:
-                    msg += "لا يوجد تغيير"
+                    msg += "📉 $" + f"{diff:,.2f} ({pct:.2f}%)" + "\n🔴 هبوطي"
             bot.send_message(chat_id, msg, parse_mode="Markdown")
         except:
             bot.send_message(chat_id, "خطا في جلب سعر الذهب.")
+
+    elif data == "currencies":
+        try:
+            rates = fetch_currency_rates()
+            if rates:
+                msg = "💱 *اسعار العملات مقابل الدولار*\n━━━━━━━━━━━━━━━━━\n\n"
+                pairs = [
+                    ('EUR', '🇪🇺', 'اليورو'),
+                    ('GBP', '🇬🇧', 'الجنيه'),
+                    ('JPY', '🇯🇵', 'الين'),
+                    ('CAD', '🇨🇦', 'الدولار الكندي'),
+                    ('AUD', '🇦🇺', 'الدولار الاسترالي'),
+                    ('CHF', '🇨🇭', 'الفرنك السويسري'),
+                    ('NZD', '🇳🇿', 'الدولار النيوزيلندي'),
+                ]
+                for code, flag, name in pairs:
+                    if code in rates:
+                        rate = rates[code]
+                        usd_per = 1 / rate if rate != 0 else 0
+                        msg += flag + " " + code + " = *" + f"{usd_per:.4f}" + "* USD\n"
+                msg += "\n🕐 " + now_utc().strftime('%Y-%m-%d %H:%M') + " UTC"
+                bot.send_message(chat_id, msg, parse_mode="Markdown")
+            else:
+                bot.send_message(chat_id, "خطا في جلب اسعار العملات.")
+        except Exception as ex:
+            bot.send_message(chat_id, "خطا: " + str(ex))
+
+    elif data == "set_alert":
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("🥇 تنبيه الذهب", callback_data="alert_gold"),
+            types.InlineKeyboardButton("💱 تنبيه عملة", callback_data="alert_currency")
+        )
+        bot.send_message(chat_id, "🔔 *اختر نوع التنبيه:*",
+                        parse_mode="Markdown", reply_markup=markup)
+
+    elif data == "alert_gold":
+        user_states[chat_id] = 'waiting_gold_alert'
+        bot.send_message(chat_id,
+            "🥇 *تنبيه سعر الذهب*\n\n"
+            "ارسل السعر المطلوب بالدولار:\n"
+            "مثال: *4100*",
+            parse_mode="Markdown")
+
+    elif data == "alert_currency":
+        user_states[chat_id] = 'waiting_currency_alert'
+        bot.send_message(chat_id,
+            "💱 *تنبيه سعر العملة*\n\n"
+            "ارسل رمز العملة والسعر المطلوب:\n"
+            "مثال: *EUR 1.10*",
+            parse_mode="Markdown")
 
     elif data == "today":
         try:
@@ -373,7 +519,7 @@ def handle_callback(c):
                     msg += "🕐 `" + e['time'] + "`\n"
                     msg += flag + " *" + name + "*\n"
                     msg += "📌 " + e['event'] + "\n"
-                    msg += "🎯 التوقع: `" + e['forecast'] + "`\n\n"
+                    msg += "🎯 " + e['forecast'] + " | 📉 " + e['previous'] + "\n\n"
                 bot.send_message(chat_id, msg, parse_mode="Markdown")
             else:
                 bot.send_message(chat_id, "لا توجد احداث عالية التاثير اليوم.")
@@ -405,8 +551,8 @@ def handle_callback(c):
             buttons.append(types.InlineKeyboardButton(
                 status + " " + flag + " " + cur, callback_data="toggle_" + cur))
         markup.add(*buttons)
-        markup.add(types.InlineKeyboardButton("💾 حفظ الاعدادات", callback_data="save_filter"))
-        bot.send_message(chat_id, "⚙️ *فلتر العملات*\nاضغط لتفعيل او ايقاف العملة:",
+        markup.add(types.InlineKeyboardButton("💾 حفظ", callback_data="save_filter"))
+        bot.send_message(chat_id, "⚙️ *فلتر العملات*",
                         parse_mode="Markdown", reply_markup=markup)
 
     elif data.startswith("toggle_"):
@@ -423,12 +569,12 @@ def handle_callback(c):
             buttons.append(types.InlineKeyboardButton(
                 status + " " + flag + " " + cu, callback_data="toggle_" + cu))
         markup.add(*buttons)
-        markup.add(types.InlineKeyboardButton("💾 حفظ الاعدادات", callback_data="save_filter"))
+        markup.add(types.InlineKeyboardButton("💾 حفظ", callback_data="save_filter"))
         bot.edit_message_reply_markup(chat_id, c.message.message_id, reply_markup=markup)
 
     elif data == "save_filter":
         names = [COUNTRY_NAME.get(cu, cu) for cu in sorted(user_currencies)]
-        msg = "✅ *تم الحفظ!*\nالعملات المفعلة:\n" + "\n".join("• " + n for n in names)
+        msg = "✅ *تم الحفظ!*\n" + "\n".join("• " + n for n in names)
         bot.send_message(chat_id, msg, parse_mode="Markdown")
 
     elif data == "stats":
@@ -446,12 +592,14 @@ def handle_callback(c):
 
     elif data == "status":
         gold_txt = "\n🥇 اخر سعر ذهب: $" + f"{last_gold_price:,.2f}" if last_gold_price else ""
+        alerts_count = sum(len(v) for v in price_alerts.values())
         msg = (
-            "✅ *البوت يعمل بشكل طبيعي*\n"
+            "✅ *البوت يعمل*\n"
             "━━━━━━━━━━━━━━━━━\n"
-            "📌 احداث متابعة: " + str(len(sent_actual_ids)) + "\n"
-            "📰 اخبار مرسلة: " + str(len(sent_news_titles)) + "\n"
-            "💱 عملات مفعلة: " + str(len(user_currencies)) +
+            "📌 احداث: " + str(len(sent_actual_ids)) + "\n"
+            "📰 اخبار: " + str(len(sent_news_titles)) + "\n"
+            "🔔 تنبيهات: " + str(alerts_count) + "\n"
+            "💱 عملات: " + str(len(user_currencies)) +
             gold_txt
         )
         bot.send_message(chat_id, msg, parse_mode="Markdown")
