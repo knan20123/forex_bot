@@ -22,7 +22,6 @@ app = Flask(__name__)
 sent_actual_ids = set()
 sent_news_titles = set()
 announced_pre = set()
-last_news_hour = ""
 last_gold_price = None
 weekly_events = []
 user_currencies = {'USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'NZD', 'CHF'}
@@ -44,23 +43,28 @@ COUNTRY_NAME = {
 ALL_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'NZD', 'CHF', 'CNY']
 
 KEYWORDS = [
-    'فيدرالي', 'فائدة', 'تضخم', 'بطالة', 'ناتج', 'اقتصاد', 'نمو',
-    'بيتكوين', 'عملات رقمية', 'كريبتو', 'بلوكشين', 'ايثيريوم',
+    'حرب', 'عقوبات', 'صراع', 'توتر', 'ازمة', 'هجوم', 'غارة', 'قصف',
+    'فيدرالي', 'فائدة', 'تضخم', 'بطالة', 'ناتج', 'اقتصاد', 'نمو', 'ركود',
+    'بيتكوين', 'عملات رقمية', 'كريبتو', 'ايثيريوم', 'بلوكشين',
     'نفط', 'ذهب', 'برميل', 'اوبك', 'خام',
-    'حرب', 'عقوبات', 'صراع', 'توتر', 'ازمة',
     'دولار', 'يورو', 'عملة', 'صرف',
     'بورصة', 'اسهم', 'سوق', 'استثمار', 'مؤشر',
-    'بنك', 'مركزي', 'سياسة نقدية', 'احتياطي',
-    'ديون', 'ميزانية', 'عجز', 'تجارة',
-    'صندوق النقد', 'البنك الدولي', 'ناسداك', 'وول ستريت'
+    'بنك', 'مركزي', 'احتياطي',
+    'ديون', 'ميزانية', 'عجز',
+    'صندوق النقد', 'البنك الدولي',
+    'زلزال', 'كارثة', 'وفاة', 'اغتيال', 'انتخاب',
+    'نووي', 'صاروخ', 'تفجير'
 ]
 
 RSS_FEEDS = [
-    ('الجزيرة اقتصاد', 'https://www.aljazeera.net/rss/economy.xml'),
-    ('العربية اقتصاد', 'https://www.alarabiya.net/rss/asequence/economy'),
-    ('رويترز عربي', 'https://feeds.reuters.com/reuters/MENBusinessNews'),
-    ('CNBC عربية', 'https://www.cnbcarabia.com/rss'),
+    'https://www.aljazeera.net/rss/all.xml',
+    'https://www.alarabiya.net/rss/arab-and-world',
+    'https://feeds.bbci.co.uk/arabic/rss.xml',
+    'https://feeds.reuters.com/reuters/MENBusinessNews',
 ]
+
+def now_utc():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 @app.route('/')
 def home():
@@ -68,6 +72,36 @@ def home():
 
 def run_flask():
     app.run(host='0.0.0.0', port=9090)
+
+def clean_text(text):
+    text = re.sub('<[^<]+?>', '', text)
+    text = re.sub(r'http\S+', '', text)
+    text = text.strip()
+    return text
+
+def is_important(title, desc=''):
+    text = (title + ' ' + desc).lower()
+    return any(kw in text for kw in KEYWORDS)
+
+def fetch_rss_news():
+    all_news = []
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    for url in RSS_FEEDS:
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            root = ET.fromstring(response.content)
+            items = root.findall('.//item')
+            for item in items[:15]:
+                title = clean_text(item.findtext('title', ''))
+                desc = clean_text(item.findtext('description', ''))[:200]
+                if title and is_important(title, desc) and title not in sent_news_titles:
+                    all_news.append({
+                        'title': title,
+                        'desc': desc,
+                    })
+        except Exception as ex:
+            logger.error("خطا RSS: " + str(ex))
+    return all_news
 
 def format_time(raw):
     try:
@@ -96,32 +130,6 @@ def get_sentiment(actual, forecast):
             return 'محايد'
     except:
         return ''
-
-def is_important(title, desc=''):
-    text = (title + ' ' + desc).lower()
-    return any(kw in text for kw in KEYWORDS)
-
-def fetch_rss_news():
-    all_news = []
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    for source_name, url in RSS_FEEDS:
-        try:
-            response = requests.get(url, headers=headers, timeout=10)
-            root = ET.fromstring(response.content)
-            items = root.findall('.//item')
-            for item in items[:10]:
-                title = item.findtext('title', '').strip()
-                desc = item.findtext('description', '').strip()
-                desc = re.sub('<[^<]+?>', '', desc)[:150]
-                if title and is_important(title, desc):
-                    all_news.append({
-                        'title': title,
-                        'desc': desc,
-                        'source': source_name
-                    })
-        except Exception as ex:
-            logger.error("خطا RSS " + source_name + ": " + str(ex))
-    return all_news
 
 def fetch_gold_price():
     url = "https://www.goldapi.io/api/XAU/USD"
@@ -179,42 +187,36 @@ def monitor_gold():
                         msg += "📉 التغيير: $" + f"{diff:,.2f} ({pct:.2f}%)" + "\n"
                         msg += "🔴 الاتجاه: هبوطي"
                     else:
-                        msg += "لا يوجد تغيير"
+                        msg += "➡️ لا يوجد تغيير"
                 last_gold_price = price
                 bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
         except Exception as ex:
             logger.error("خطا الذهب: " + str(ex))
         time.sleep(7200)
 
-def send_daily_news():
-    global last_news_hour
+def monitor_news():
     while True:
         try:
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
-            hour_key = now.strftime('%Y-%m-%d') + str(now.hour)
-            if now.hour in [8, 16] and hour_key != last_news_hour:
-                articles = fetch_rss_news()
-                new_articles = [a for a in articles if a['title'] not in sent_news_titles]
-                if new_articles:
-                    msg = "📰 *اخبار اقتصادية مهمة*\n"
+            articles = fetch_rss_news()
+            if articles:
+                for a in articles[:5]:
+                    msg = "📰 *خبر عاجل*\n"
                     msg += "━━━━━━━━━━━━━━━━━\n\n"
-                    for a in new_articles[:5]:
-                        msg += "📌 *" + a['title'] + "*\n"
-                        if a['desc']:
-                            msg += "📝 " + a['desc'] + "\n"
-                        msg += "📡 " + a['source'] + "\n\n"
-                        sent_news_titles.add(a['title'])
+                    msg += "📌 *" + a['title'] + "*\n"
+                    if a['desc'] and a['desc'] != a['title']:
+                        msg += "📝 " + a['desc'] + "\n"
                     bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-                    last_news_hour = hour_key
-                    logger.info("تم ارسال الاخبار")
+                    sent_news_titles.add(a['title'])
+                    time.sleep(2)
+            logger.info("فحص الاخبار: " + str(len(articles)) + " خبر جديد")
         except Exception as ex:
             logger.error("خطا الاخبار: " + str(ex))
-        time.sleep(1800)
+        time.sleep(900)
 
 def send_weekly_stats():
     while True:
         try:
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            now = now_utc()
             if now.weekday() == 4 and now.hour == 20:
                 if weekly_events:
                     positive = sum(1 for e in weekly_events if 'ايجابي' in e.get('sentiment',''))
@@ -243,11 +245,11 @@ def check_calendar():
     upcoming_sent = {}
     while True:
         try:
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            now = now_utc()
             events = fetch_calendar()
             for e in events:
-                event_dt = e['dt']
-                diff_minutes = (event_dt.replace(tzinfo=None) - now.replace(tzinfo=None)).total_seconds() / 60
+                event_dt = e['dt'].replace(tzinfo=None)
+                diff_minutes = (event_dt - now).total_seconds() / 60
 
                 pre_id = "pre_" + e['id']
                 if 14 <= diff_minutes <= 16 and pre_id not in announced_pre:
@@ -324,7 +326,7 @@ def start(m):
         "🔔 سيتم اشعارك تلقائيا بـ:\n"
         "• الاحداث الاقتصادية عالية التاثير\n"
         "• سعر الذهب كل ساعتين\n"
-        "• اخبار اقتصادية مهمة مرتين يوميا\n\n"
+        "• اخبار عاجلة ومهمة كل 15 دقيقة\n\n"
         "اضغط على 📋 *القائمة* للبدء\n\n"
         "👨 *تم انشاء هذا البوت بواسطة*\n"
         "د/عاصم النجار"
@@ -361,7 +363,7 @@ def handle_callback(c):
     elif data == "today":
         try:
             events = fetch_calendar()
-            today = datetime.now(timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%d')
+            today = now_utc().strftime('%Y-%m-%d')
             today_events = [e for e in events if e['time'].startswith(today)]
             if today_events:
                 msg = "📅 *احداث اليوم الاقتصادية* 🔴\n━━━━━━━━━━━━━━━━━\n\n"
@@ -382,12 +384,12 @@ def handle_callback(c):
         try:
             articles = fetch_rss_news()
             if articles:
-                msg = "📰 *اخر الاخبار الاقتصادية*\n━━━━━━━━━━━━━━━━━\n\n"
+                msg = "📰 *اخر الاخبار العاجلة*\n━━━━━━━━━━━━━━━━━\n\n"
                 for a in articles[:5]:
                     msg += "📌 *" + a['title'] + "*\n"
-                    if a['desc']:
+                    if a['desc'] and a['desc'] != a['title']:
                         msg += "📝 " + a['desc'] + "\n"
-                    msg += "📡 " + a['source'] + "\n\n"
+                    msg += "\n"
                 bot.send_message(chat_id, msg, parse_mode="Markdown")
             else:
                 bot.send_message(chat_id, "لا توجد اخبار مهمة الان.")
@@ -448,6 +450,7 @@ def handle_callback(c):
             "✅ *البوت يعمل بشكل طبيعي*\n"
             "━━━━━━━━━━━━━━━━━\n"
             "📌 احداث متابعة: " + str(len(sent_actual_ids)) + "\n"
+            "📰 اخبار مرسلة: " + str(len(sent_news_titles)) + "\n"
             "💱 عملات مفعلة: " + str(len(user_currencies)) +
             gold_txt
         )
@@ -460,7 +463,6 @@ if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=check_calendar, daemon=True).start()
     threading.Thread(target=monitor_gold, daemon=True).start()
-    threading.Thread(target=send_daily_news, daemon=True).start()
+    threading.Thread(target=monitor_news, daemon=True).start()
     threading.Thread(target=send_weekly_stats, daemon=True).start()
     bot.infinity_polling()
-# update Mon Jun 29 08:16:53 +03 2026
