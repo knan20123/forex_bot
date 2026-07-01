@@ -63,7 +63,7 @@ RSS_FEEDS = [
     'https://www.aljazeera.net/rss/all.xml',
     'https://www.alarabiya.net/rss/arab-and-world',
     'https://feeds.bbci.co.uk/arabic/rss.xml',
-    'https://feeds.reuters.com/reuters/MENBusinessNews',
+    'https://www.skynewsarabia.com/rss/all',
 ]
 
 def now_utc():
