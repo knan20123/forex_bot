@@ -436,6 +436,7 @@ def handle_text(m):
 
 @bot.callback_query_handler(func=lambda c: True)
 def handle_callback(c):
+    logger.info('CALLBACK RECEIVED: ' + str(c.data))
     chat_id = c.message.chat.id
     data = c.data
 
