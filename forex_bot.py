@@ -33,7 +33,7 @@ user_states = {}
 COUNTRY_FLAG = {
     'USD': '🇺🇸', 'EUR': '🇪🇺', 'GBP': '🇬🇧', 'JPY': '🇯🇵',
     'CAD': '🇨🇦', 'AUD': '🇦🇺', 'NZD': '🇳🇿', 'CHF': '🇨🇭',
-    'CNY': '🇨🇳', 'CNH': '🇨🇳'
+    'CNY': '🇨🇳', 'CNH': '🇨🇳', 'SAR': '🇸🇦', 'EGP': '🇪🇬'
 }
 
 COUNTRY_NAME = {
@@ -41,7 +41,7 @@ COUNTRY_NAME = {
     'GBP': 'الجنيه الاسترليني', 'JPY': 'الين الياباني',
     'CAD': 'الدولار الكندي', 'AUD': 'الدولار الاسترالي',
     'NZD': 'الدولار النيوزيلندي', 'CHF': 'الفرنك السويسري',
-    'CNY': 'اليوان الصيني'
+    'CNY': 'اليوان الصيني', 'SAR': 'الريال السعودي', 'EGP': 'الجنيه المصري'
 }
 
 ALL_CURRENCIES = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'NZD', 'CHF', 'CNY']
@@ -61,6 +61,9 @@ RSS_FEEDS = [
     'https://feeds.bbci.co.uk/arabic/rss.xml',
     'https://www.skynewsarabia.com/rss.xml',
 ]
+
+BBC_BREAKING_FEED = 'https://feeds.bbci.co.uk/arabic/rss.xml'
+sent_bbc_titles = set()
 
 
 def now_utc():
@@ -106,7 +109,27 @@ def fetch_rss_news():
     return all_news
 
 
+def fetch_bbc_breaking():
+    """يجلب اخر اخبار BBC عربي بدون فلترة بالكلمات المفتاحية (اخبار عاجلة عامة)"""
+    breaking_news = []
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        response = requests.get(BBC_BREAKING_FEED, headers=headers, timeout=10)
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+        items = root.findall('.//item')
+        for item in items[:10]:
+            title = clean_text(item.findtext('title', ''))
+            desc = clean_text(item.findtext('description', ''))[:200]
+            if title and title not in sent_bbc_titles:
+                breaking_news.append({'title': title, 'desc': desc})
+    except Exception as ex:
+        logger.error("خطا BBC العاجلة: " + str(ex))
+    return breaking_news
+
+
 def fetch_gold_price(retries=2):
+    """يرجع السعر او None لو فشلت كل المحاولات"""
     url = "https://www.goldapi.io/api/XAU/USD"
     headers = {'x-access-token': GOLD_API}
     for attempt in range(retries + 1):
@@ -279,6 +302,24 @@ def monitor_news():
         time.sleep(900)
 
 
+def monitor_bbc_breaking():
+    while True:
+        try:
+            articles = fetch_bbc_breaking()
+            for a in articles[:5]:
+                msg = "🌍 *خبر عاجل - BBC عربي*\n━━━━━━━━━━━━━━━━━\n\n"
+                msg += "📌 *" + a['title'] + "*\n"
+                if a['desc'] and a['desc'] != a['title']:
+                    msg += "📝 " + a['desc'] + "\n"
+                bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
+                with data_lock:
+                    sent_bbc_titles.add(a['title'])
+                time.sleep(2)
+        except Exception as ex:
+            logger.error("خطا مراقبة BBC العاجلة: " + str(ex))
+        time.sleep(600)
+
+
 def send_weekly_stats():
     while True:
         try:
@@ -365,7 +406,8 @@ def send_main_menu(chat_id):
         types.InlineKeyboardButton("📅 احداث اليوم", callback_data="today"),
         types.InlineKeyboardButton("📰 اخر الاخبار", callback_data="news"),
         types.InlineKeyboardButton("🔔 تنبيه سعر", callback_data="set_alert"),
-        types.InlineKeyboardButton("📡 حالة البوت", callback_data="status")
+        types.InlineKeyboardButton("📡 حالة البوت", callback_data="status"),
+        types.InlineKeyboardButton("🌍 اخبار BBC العاجلة", callback_data="bbc_news")
     )
     bot.send_message(chat_id, "🤖 القائمة الرئيسية - اختر ما تريد:", reply_markup=markup)
 
@@ -424,15 +466,33 @@ def handle_callback(c):
             rates = fetch_currency_rates()
             if rates:
                 msg = "💱 اسعار العملات مقابل الدولار\n\n"
-                pairs = [('EUR', '🇪🇺'), ('GBP', '🇬🇧'), ('JPY', '🇯🇵'), ('CAD', '🇨🇦'), ('AUD', '🇦🇺')]
-                for code, flag in pairs:
+                inverted_pairs = [('EUR', '🇪🇺'), ('GBP', '🇬🇧'), ('JPY', '🇯🇵'), ('CAD', '🇨🇦'), ('AUD', '🇦🇺')]
+                for code, flag in inverted_pairs:
                     rate = rates.get(code)
                     if rate:
                         usd_per = 1 / rate
                         msg += flag + " " + code + " = " + f"{usd_per:.4f}" + " USD\n"
+
+                msg += "\n"
+                direct_pairs = [('SAR', '🇸🇦'), ('EGP', '🇪🇬')]
+                for code, flag in direct_pairs:
+                    rate = rates.get(code)
+                    if rate:
+                        name = COUNTRY_NAME.get(code, code)
+                        msg += flag + " 1$ = " + f"{rate:.2f}" + " " + name + "\n"
                 bot.send_message(chat_id, msg)
             else:
                 bot.send_message(chat_id, "❌ خطا في جلب الاسعار، حاول لاحقًا")
+
+        elif data == "bbc_news":
+            articles = fetch_bbc_breaking()
+            if articles:
+                msg = "🌍 اخر الاخبار العاجلة - BBC عربي\n\n"
+                for a in articles[:5]:
+                    msg += "📌 " + a['title'] + "\n\n"
+                bot.send_message(chat_id, msg)
+            else:
+                bot.send_message(chat_id, "لا توجد اخبار جديدة الان")
 
         elif data == "today":
             events = fetch_calendar()
@@ -484,6 +544,7 @@ if __name__ == "__main__":
     threading.Thread(target=check_calendar, daemon=True).start()
     threading.Thread(target=monitor_gold, daemon=True).start()
     threading.Thread(target=monitor_news, daemon=True).start()
+    threading.Thread(target=monitor_bbc_breaking, daemon=True).start()
     threading.Thread(target=send_weekly_stats, daemon=True).start()
     bot.remove_webhook()
     time.sleep(1)
