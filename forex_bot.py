@@ -58,9 +58,8 @@ KEYWORDS = [
 ]
 
 RSS_FEEDS = [
-    'https://www.aljazeera.net/rss/all.xml',
-    'https://www.alarabiya.net/rss/arab-and-world',
     'https://feeds.bbci.co.uk/arabic/rss.xml',
+    'https://www.skynewsarabia.com/rss.xml',
 ]
 
 
